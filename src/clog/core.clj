@@ -7,12 +7,16 @@
   (cond
    (parser/defn-node? node) :defn
    (parser/fixnum-node? node) :fixnum
-   (parser/call-node? node) :call))
+   (parser/call-node? node) :call
+   (parser/alias-node? node) :alias
+   (parser/class-node? node) :class
+   (parser/iter-node? node) :iter
+   (parser/assignment-node? node) :assignment))
 
 (defn fingerprint [env]
-  (str (last (get env :class-stack ["main"]))
+  (str (last (:class-stack env))
        "#"
-       (last (get env :method-stack ["none"]))))
+       (last (:method-stack env))))
 
 (defn- process-env [node env]
   (if-let [processor (processors (get-type node))]
@@ -21,43 +25,64 @@
 
 (defn- process-result [node env result]
   (if-let [result-processor (result-processors (get-type node))]
-    (update-in result [(fingerprint env)] (result-processor env))
+    (update-in result [(fingerprint env)] #(merge-with + % (result-processor env)))
     result))
 
 (defn process-defn [node env]
-  (update-in env [:method-stack] #(cons (parser/get-name node) %)))
+  (update-in env [:method-stack] #(conj % (parser/get-name node))))
+
+(defn process-class [node env]
+  (update-in env [:class-stack] #(conj % (parser/get-class-name node))))
 
 (defn process-call [node env]
   (update-in env [:multiplier] #(+ % 0.2)))
 
-(defn result-fixnum [env]
-  (fn [score]
-    (+ (* (:multiplier env) 0.25) (or score 0))))
+(defn process-iter [node env]
+  (update-in env [:multiplier] #(+ % 0.1)))
 
-(defn result-defn [env]
-  (fn [score]
-    (+ (* (:multiplier env) 1.0) (or score 0))))
+(defn result-fixnum [env]
+  {:other (* (:multiplier env) 0.25)})
+
+(defn result-alias [env]
+  {:other (* (:multiplier env) 2.0)})
+
+(defn result-iter [env]
+  {:branch (* (:multiplier env) 1.0)})
+
+(defn result-call [env]
+  {:other 1.0})
+
+(defn result-assignment [env]
+  {:assignment (* (:multiplier env) 1.0)})
 
 (def processors {:defn process-defn
-                 :call process-call})
+                 :call process-call
+                 :class process-class
+                 :iter process-iter})
 
 (def result-processors {:fixnum result-fixnum
-                        :defn result-defn})
+                        :alias result-alias
+                        :iter result-iter
+                        :assignment result-assignment
+                        :call result-call})
 
-(defn- process-tree
-  ([tree]
-   (process-tree tree {:multiplier 1.0} {}))
-  ([tree env result]
-   (cond
-    (empty? tree) result
-    (seq? (first tree)) (merge result
-                               (process-tree (first tree) env result)
-                               (process-tree (rest tree) env result))
-    :else (let [next-env (process-env (first tree) env)]
-            (process-tree (rest tree)
-                          next-env
-                          (process-result (first tree) next-env result))))
-   ))
+(defn- process-root
+  ([root]
+   (process-root root {:multiplier 1.0 :class-stack ["main"] :method-stack ["none"]} {}))
+  ([root env]
+   (process-root root env {}))
+  ([root env result]
+   (let [children (parser/children root)
+         next-env (process-env root env)
+         next-result (process-result root next-env result)]
+     (if (empty? children)
+       next-result
+       (apply (partial merge-with (partial merge-with +))
+              (cons next-result
+                    (map #(process-root % next-env) children)))))))
 
 (defn clog [rb]
-  (process-tree (parser/parse-tree rb)))
+  (into {}
+        (map (fn [[fp scores]]
+               [fp (Math/sqrt (reduce + 0 (map #(Math/pow % 2) (vals scores))))])
+             (process-root (parser/parse-ruby rb)))))
